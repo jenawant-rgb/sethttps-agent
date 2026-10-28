@@ -28,6 +28,8 @@ UNINSTALL=0
 
 SSHD_CONFIG="${SSHD_CONFIG:-/etc/ssh/sshd_config}"
 USER_SHELL="/usr/sbin/nologin"
+RELOAD_WRAPPER="/usr/local/bin/sethttps-reload"
+RELOAD_UNIT="sethttps-reload"
 
 usage() {
     sed -n '3,20p' "$0" | sed 's/^# \{0,1\}//'
@@ -74,7 +76,10 @@ if [[ $UNINSTALL -eq 1 ]]; then
         mv "$SSHD_CONFIG.tmp" "$SSHD_CONFIG"
         warn "sshd_config edited — check it with: sshd -t"
     fi
-    rm -f "/etc/sudoers.d/$USER_NAME"
+    systemctl disable --now "${RELOAD_UNIT}.path" 2>/dev/null || true
+    rm -f "/etc/systemd/system/${RELOAD_UNIT}.path" "/etc/systemd/system/${RELOAD_UNIT}.service"
+    systemctl daemon-reload 2>/dev/null || true
+    rm -f "/usr/local/bin/sethttps-reload" "/etc/sudoers.d/$USER_NAME"
     if id "$USER_NAME" &>/dev/null; then
         userdel "$USER_NAME" 2>/dev/null || true
     fi
@@ -165,6 +170,8 @@ Match User $USER_NAME
     AllowTcpForwarding no
     X11Forwarding no
     PermitTunnel no
+    # password auth for this one jailed account, whatever the global setting is
+    PasswordAuthentication yes
 EOF
     fi
 fi
@@ -175,16 +182,61 @@ if [[ $DRY_RUN -eq 0 ]]; then
     systemctl restart sshd 2>/dev/null || systemctl restart ssh 2>/dev/null || warn "restart sshd manually"
 fi
 
-# -------------------------------------------------------------------- sudoers ---
+# ------------------------------------------------------- reload trigger ---
+# The platform cannot execute anything here: the account is chrooted and has no
+# shell. So the reload command lives in a root-owned wrapper, and a systemd path
+# unit starts it when a marker file appears next to the certificates. Dropping
+# that marker is the only lever the platform has.
+MARKER="$UPLOAD_DIR/reload.request"
+
 if [[ -n "$RELOAD_CMD" ]]; then
-    log "Allowing exactly one passwordless command: $RELOAD_CMD"
+    log "Installing reload wrapper: $RELOAD_WRAPPER"
     if [[ $DRY_RUN -eq 1 ]]; then
-        printf '   \033[90m$ echo "%s ALL=(ALL) NOPASSWD: %s" > /etc/sudoers.d/%s\033[0m\n' \
-            "$USER_NAME" "$RELOAD_CMD" "$USER_NAME"
+        printf '   \033[90m$ cat > %s <<EOS  (%s)\033[0m\n' "$RELOAD_WRAPPER" "$RELOAD_CMD"
     else
-        printf '%s ALL=(ALL) NOPASSWD: %s\n' "$USER_NAME" "$RELOAD_CMD" > "/etc/sudoers.d/$USER_NAME"
-        chmod 440 "/etc/sudoers.d/$USER_NAME"
-        visudo -c -f "/etc/sudoers.d/$USER_NAME" >/dev/null || die "sudoers rule rejected" 3
+        cat > "$RELOAD_WRAPPER" <<EOS
+#!/bin/bash
+# Installed by sethttps-agent.sh. Re-run the script to change it.
+set -euo pipefail
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+$RELOAD_CMD
+EOS
+        chown root:root "$RELOAD_WRAPPER"
+        chmod 755 "$RELOAD_WRAPPER"
+    fi
+
+    run mkdir -p "$UPLOAD_DIR"
+    if [[ $DRY_RUN -eq 0 ]]; then
+        [[ -f "$MARKER" ]] || : > "$MARKER"
+        chown "$USER_NAME:$USER_NAME" "$MARKER"
+    fi
+
+    if [[ $DRY_RUN -eq 1 ]]; then
+        printf '   \033[90m$ systemctl enable --now %s.path  (watches %s)\033[0m\n' "$RELOAD_UNIT" "$MARKER"
+    else
+        cat > "/etc/systemd/system/${RELOAD_UNIT}.service" <<EOS
+[Unit]
+Description=Reload the web server after a SetHttps certificate update
+
+[Service]
+Type=oneshot
+ExecStart=$RELOAD_WRAPPER
+EOS
+
+        cat > "/etc/systemd/system/${RELOAD_UNIT}.path" <<EOS
+[Unit]
+Description=Watch the SetHttps reload marker
+
+[Path]
+PathModified=$MARKER
+Unit=${RELOAD_UNIT}.service
+
+[Install]
+WantedBy=paths.target
+EOS
+
+        systemctl daemon-reload
+        systemctl enable --now "${RELOAD_UNIT}.path"
     fi
 else
     log "No --reload-cmd given: the account can only upload files"
@@ -199,7 +251,7 @@ $( [[ $DRY_RUN -eq 1 ]] && echo "DRY RUN — nothing was changed." )
   password  $PASSWORD $( [[ ${GENERATED:-0} -eq 1 ]] && echo "(generated, copy it now)" )
   host dir  $UPLOAD_DIR
   sshd      Match User block in $SSHD_CONFIG
-  sudo      $( [[ -n "$RELOAD_CMD" ]] && echo "only: $RELOAD_CMD" || echo "none" )
+  reload    $( [[ -n "$RELOAD_CMD" ]] && echo "\"$RELOAD_CMD\" via $RELOAD_UNIT.path" || echo "not configured" )
 
 Check it manually:
 

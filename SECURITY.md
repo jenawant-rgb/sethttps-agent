@@ -13,12 +13,14 @@ This file describes the boundary, not a promise.
 | Chroot | one directory (`dirname` of `--path`) | Cannot read anything outside it via SFTP |
 | Subsystem | `ForceCommand internal-sftp` | Only file transfer; no `scp -O`, no exec |
 | Forwarding | `AllowTcpForwarding no`, `X11Forwarding no`, `PermitTunnel no` | Cannot pivot into your network |
-| Sudo | none by default; one exact command with `--reload-cmd` | Worst case is a reload of your web server |
+| Sudo | none — no sudoers entry at all | Nothing to escalate |
+| Reload | root-owned wrapper, fired by a systemd path unit | The platform can only trigger it, not change it |
 
 ## What an attacker with the password could do
 
 - Upload, overwrite and delete **files inside the upload directory**.
-- If `--reload-cmd` is set: run that exact command as root.
+- Drop a `reload.request` marker, which makes systemd run the root-owned reload
+  wrapper. It cannot alter that wrapper.
 - Nothing else. No shell, no other paths, no network pivot.
 
 ## What it cannot do
