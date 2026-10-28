@@ -40,6 +40,6 @@ This file describes the boundary, not a promise.
 
 ## Reporting a vulnerability
 
-Email `security@sethttps.com` with the script version and a description. Please do
+Email `support@sethttps.com` with the script version and a description. Please do
 not open a public issue for anything that could be used to attack a running
 installation.
